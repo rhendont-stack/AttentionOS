@@ -1,0 +1,140 @@
+name: Aviso de cambios en el original
+
+# Revisa cada día si el repositorio original (evanbaker315/AttentionOS) tiene commits
+# que este fork todavía no tiene. Si los hay, abre un issue con la lista de cambios y
+# cómo integrarlos; GitHub te avisa por correo y en la app.
+# Si llegan más cambios, actualiza el mismo issue y te vuelve a avisar.
+# Cuando ya los integraste, cierra el issue solo.
+
+on:
+  schedule:
+    # 13:00 UTC = 8:00 a. m. en UTC-5. GitHub puede retrasarlo unos minutos.
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      rama:
+        description: "Rama de tu fork que se compara con el original"
+        default: main
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: aviso-cambios-original
+  cancel-in-progress: false
+
+jobs:
+  revisar:
+    name: Revisar el original
+    # Solo corre en el fork. Si este archivo llegara al repositorio original, allí no hace nada.
+    if: github.repository != 'evanbaker315/AttentionOS'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DUENO: ${{ github.repository_owner }}
+      ORIGINAL: evanbaker315/AttentionOS
+      RAMA_ORIGINAL: main
+      RAMA: ${{ inputs.rama || 'main' }}
+      ETIQUETA: cambios-del-original
+    steps:
+      - name: Comparar con el original y avisar
+        run: |
+          set -euo pipefail
+          original_dueno="${ORIGINAL%%/*}"
+
+          # ahead_by = commits que el original tiene y tu fork no.
+          gh api "repos/$REPO/compare/$RAMA...$original_dueno:$RAMA_ORIGINAL" > comparacion.json
+          nuevos=$(jq -r '.ahead_by' comparacion.json)
+          sha=$(gh api "repos/$ORIGINAL/branches/$RAMA_ORIGINAL" --jq '.commit.sha')
+
+          gh label create "$ETIQUETA" -R "$REPO" --color 1f6feb \
+            --description "Cambios nuevos en el repositorio original" --force > /dev/null
+          abierto=$(gh issue list -R "$REPO" --label "$ETIQUETA" --state open --limit 1 \
+            --json number --jq '.[0].number // empty')
+
+          if [ "$nuevos" -eq 0 ]; then
+            if [ -n "$abierto" ]; then
+              gh issue close "$abierto" -R "$REPO" \
+                --comment "Ya tienes integrados todos los cambios del original. Cierro este aviso."
+              echo "Los cambios ya están integrados; cerré el aviso #$abierto." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Sin cambios nuevos en el original." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          # Si el aviso abierto ya describe este mismo estado del original, no se vuelve a avisar.
+          if [ -n "$abierto" ]; then
+            anterior=$(gh issue view "$abierto" -R "$REPO" --json body --jq '.body' \
+              | sed -n 's/.*sha-original: \([0-9a-f]*\).*/\1/p' | head -n 1)
+            if [ "$anterior" = "$sha" ]; then
+              echo "El aviso #$abierto ya está al día." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          if [ "$nuevos" -eq 1 ]; then
+            titulo="Hay 1 cambio nuevo en el AttentionOS original"
+            cantidad="**1 commit**"
+          else
+            titulo="Hay $nuevos cambios nuevos en el AttentionOS original"
+            cantidad="**$nuevos commits**"
+          fi
+
+          # En los títulos de los commits se neutralizan @ y # (espacio de ancho cero)
+          # para no mencionar a nadie ni enlazar issues equivocados de este fork.
+          lista=$(jq -r '.commits | reverse | .[:50][] |
+            "- [`\(.sha[0:7])`](\(.html_url)) \(.commit.message | split("\n")[0] | gsub("@"; "@​") | gsub("#"; "#​")) (\(.commit.author.date[0:10]))"' \
+            comparacion.json)
+          extra=""
+          if [ "$nuevos" -gt 50 ]; then
+            extra="…y $((nuevos - 50)) más. Míralos todos en el enlace de diferencias."
+          fi
+          diferencias="https://github.com/$REPO/compare/$RAMA...$original_dueno:$RAMA_ORIGINAL"
+
+          cat > cuerpo.md <<EOF
+          <!-- sha-original: $sha -->
+          @$DUENO, el [AttentionOS original](https://github.com/$ORIGINAL) tiene $cantidad que tu fork todavía no tiene en \`$RAMA\`.
+
+          **Ver todas las diferencias:** $diferencias
+
+          ### Commits nuevos
+
+          $lista
+          $extra
+
+          ### Antes de integrar
+
+          Revisa el [CHANGELOG del original](https://github.com/$ORIGINAL/blob/$RAMA_ORIGINAL/CHANGELOG.md). El proyecto está en v0.1 y puede traer cambios que rompen la configuración.
+
+          ### Cómo integrarlos
+
+          **En GitHub, si no hay conflictos:** en la página de tu fork pulsa **Sync fork** y luego **Update branch**. No uses **Discard commits**: borra tus propios cambios.
+
+          **Desde tu computadora, si hay conflictos o prefieres revisar antes:**
+
+          \`\`\`bash
+          git fetch upstream
+          git merge upstream/main
+          git push
+          \`\`\`
+
+          Después de integrar, el CI corre los tests solo. Revisa en la pestaña **Actions** que quede en verde.
+
+          ---
+          Este aviso se actualiza si llegan más cambios y se cierra solo cuando ya estén integrados.
+          EOF
+
+          if [ -n "$abierto" ]; then
+            gh issue edit "$abierto" -R "$REPO" --title "$titulo" --body-file cuerpo.md > /dev/null
+            gh issue comment "$abierto" -R "$REPO" \
+              --body "@$DUENO llegaron más cambios del original. Actualicé la lista en la descripción del aviso." > /dev/null
+            echo "Actualicé el aviso #$abierto: $nuevos cambios pendientes." >> "$GITHUB_STEP_SUMMARY"
+          else
+            url=$(gh issue create -R "$REPO" --title "$titulo" --body-file cuerpo.md --label "$ETIQUETA")
+            echo "Abrí el aviso: $url" >> "$GITHUB_STEP_SUMMARY"
+          fi
