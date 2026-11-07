@@ -8,8 +8,9 @@ name: Aviso de cambios en el original
 
 on:
   schedule:
-    # 13:00 UTC = 8:00 a. m. en UTC-5. GitHub puede retrasarlo unos minutos.
-    - cron: "0 13 * * *"
+    # 13:23 UTC = 8:23 a. m. en UTC-5. Se evita la hora en punto porque GitHub
+    # retrasa o salta más las tareas programadas en ese momento.
+    - cron: "23 13 * * *"
   workflow_dispatch:
     inputs:
       rama:
